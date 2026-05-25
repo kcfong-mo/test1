@@ -1,0 +1,1007 @@
+html_content = r"""<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>極算心速 - 雲端排行版</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #f1f5f9;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      overflow: hidden;
+      touch-action: none;
+    }
+    canvas {
+      background-color: #ffffff;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(0,0,0,0.05);
+      border-radius: 28px;
+      max-width: 100%;
+      max-height: 100vh;
+    }
+  </style>
+</head>
+<body>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+
+  const WIDTH = 400;
+  const HEIGHT = 700;
+  
+  // =========================================================================
+  // 🌐 雲端排行榜設定區
+  // =========================================================================
+  // 請在此處貼上您在 Google Apps Script 部署後獲得的「網頁應用程式網址」
+  const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyM8lS2YgyMV9O9l8R5YcbC_o8CChWYtkEb2sj1_DHXLMa0beFd2ogsT6WOaBnoRmgu/exec'; 
+
+  function resizeCanvas() {
+    const scale = Math.min(window.innerWidth / WIDTH, window.innerHeight / HEIGHT);
+    const finalScale = scale > 1 ? 1 : scale * 0.95; 
+    canvas.style.width = `${WIDTH * finalScale}px`;
+    canvas.style.height = `${HEIGHT * finalScale}px`;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = WIDTH * dpr;
+    canvas.height = HEIGHT * dpr;
+    ctx.scale(dpr, dpr);
+  }
+
+  window.addEventListener('resize', resizeCanvas);
+  resizeCanvas();
+
+  // --- 遊戲狀態與過渡管理 ---
+  let state = 'menu'; // 'menu', 'ready', 'playing', 'gameover'
+  let sceneOffsetX = 0; 
+  let difficulty = 'medium';
+  let score = 0;
+  let displayScore = 0; 
+  let timeLeft = 30;
+  let streak = 0;
+  let maxStreak = 0;
+  let correctCount = 0;
+  let question = null;
+  let userInput = '';
+  let highScore = localStorage.getItem('mathDashCanvasHighScore') || 0;
+  let activePressId = null; 
+  
+  // --- 雲端排行榜狀態變數 ---
+  let showOnlineLeaderboard = false;
+  let leaderboardData = [];
+  let leaderboardStatus = 'idle'; // 'idle', 'uploading', 'fetching', 'success', 'error'
+  let hasSubmitted = false;
+
+  // 動畫與時間控制
+  let lastTime = performance.now();
+  let feedback = null;
+  let feedbackTimer = 0;
+  let cursorBlink = 0;
+  let activeButtons = [];
+
+  // 題目彈跳動畫 
+  let qScale = 1;
+  let qScaleVel = 0;
+
+  // --- 顏色主題 ---
+  const colors = {
+    bg: '#ffffff',
+    textMain: '#1e293b',
+    textMuted: '#64748b',
+    primary: '#4f46e5',
+    primaryHover: '#4338ca',
+    primaryShadow: '#312e81',
+    success: '#10b981',
+    successBg: '#ecfdf5',
+    danger: '#f43f5e',
+    dangerBg: '#fff1f2',
+    warning: '#f59e0b',
+    warningBg: '#fffbeb',
+    surface: '#f8fafc',
+    surfaceHover: '#e2e8f0',
+    surfaceShadow: '#cbd5e1',
+    particleColors: ['#f59e0b', '#10b981', '#3b82f6', '#ec4899', '#8b5cf6']
+  };
+
+  const difficultyTextMap = {
+    'easy': '簡單 (20以內加減)',
+    'medium': '中等 (兩位數混合)',
+    'hard': '困難 (三位數混合)'
+  };
+
+  // --- 視覺特效元件 (VFX) ---
+  let particles = [];
+  let floatingTexts = [];
+  let bgSymbols = [];
+
+  const symbolsList = ['+', '-', '×', '÷', '=', '∞', '∑', 'π', '√'];
+  for(let i=0; i<25; i++) {
+    bgSymbols.push({
+      x: Math.random() * WIDTH,
+      y: Math.random() * HEIGHT,
+      text: symbolsList[Math.floor(Math.random() * symbolsList.length)],
+      vy: -Math.random() * 0.5 - 0.2, 
+      rot: Math.random() * Math.PI * 2,
+      vrot: (Math.random() - 0.5) * 0.015,
+      size: Math.random() * 40 + 30, 
+      alpha: Math.random() * 0.08 + 0.04 
+    });
+  }
+
+  class Particle {
+    constructor(x, y) {
+      this.x = x;
+      this.y = y;
+      const angle = (Math.random() * Math.PI) + Math.PI;
+      const speed = Math.random() * 8 + 4;
+      this.vx = Math.cos(angle) * speed;
+      this.vy = Math.sin(angle) * speed;
+      this.radius = Math.random() * 5 + 3;
+      this.color = colors.particleColors[Math.floor(Math.random() * colors.particleColors.length)];
+      this.life = 1.0;
+      this.decay = Math.random() * 0.015 + 0.01;
+      this.gravity = 0.2;
+      this.rotation = Math.random() * Math.PI * 2;
+      this.rotationSpeed = (Math.random() - 0.5) * 0.2;
+      this.shape = Math.random() > 0.5 ? 'circle' : 'rect';
+    }
+    update() {
+      this.vy += this.gravity;
+      this.x += this.vx;
+      this.y += this.vy;
+      this.rotation += this.rotationSpeed;
+      this.life -= this.decay;
+    }
+    draw(ctx) {
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, this.life);
+      ctx.fillStyle = this.color;
+      ctx.translate(this.x, this.y);
+      ctx.rotate(this.rotation);
+      if (this.shape === 'circle') {
+        ctx.beginPath(); ctx.arc(0, 0, this.radius, 0, Math.PI * 2); ctx.fill();
+      } else {
+        ctx.fillRect(-this.radius, -this.radius, this.radius * 2, this.radius * 2);
+      }
+      ctx.restore();
+    }
+  }
+
+  class FloatingText {
+    constructor(x, y, text, color) {
+      this.x = x; this.y = y; this.text = text; this.color = color;
+      this.life = 1.0; this.vy = -1.5;
+    }
+    update() {
+      this.y += this.vy; this.life -= 0.02;
+    }
+    draw(ctx) {
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, this.life);
+      ctx.fillStyle = this.color;
+      ctx.font = 'bold 28px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.shadowColor = 'rgba(255, 255, 255, 0.9)';
+      ctx.shadowBlur = 6;
+      ctx.fillText(this.text, this.x, this.y);
+      ctx.restore();
+    }
+  }
+
+  function spawnConfetti() {
+    for (let i = 0; i < 50; i++) {
+      particles.push(new Particle(WIDTH * 0.2, HEIGHT - 50));
+      particles.push(new Particle(WIDTH * 0.8, HEIGHT - 50));
+    }
+  }
+
+  function changeState(newState) {
+    state = newState;
+    sceneOffsetX = WIDTH; 
+  }
+
+  function triggerQuestionBounce() {
+    qScale = 0.3;     
+    qScaleVel = 0;    
+  }
+
+  // --- 題目生成邏輯 ---
+  function generateQuestion(diff) {
+    let num1, num2, operator, answer;
+    const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+    if (diff === 'easy') {
+      operator = Math.random() > 0.5 ? '+' : '-';
+      if (operator === '+') {
+        num1 = rand(1, 15); num2 = rand(1, 15); answer = num1 + num2;
+      } else {
+        num1 = rand(5, 20); num2 = rand(1, num1); answer = num1 - num2;
+      }
+    } else if (diff === 'medium') {
+      const ops = ['+', '-', '*'];
+      operator = ops[rand(0, 2)];
+      if (operator === '+') {
+        num1 = rand(10, 89); num2 = rand(10, 89); answer = num1 + num2;
+      } else if (operator === '-') {
+        num1 = rand(20, 99); num2 = rand(10, num1); answer = num1 - num2;
+      } else {
+        num1 = rand(2, 9); num2 = rand(2, 9); answer = num1 * num2;
+      }
+    } else {
+      const ops = ['+', '-', '*', '/'];
+      operator = ops[rand(0, 3)];
+      if (operator === '+') {
+        num1 = rand(100, 499); num2 = rand(100, 499); answer = num1 + num2;
+      } else if (operator === '-') {
+        num1 = rand(200, 999); num2 = rand(50, num1); answer = num1 - num2;
+      } else if (operator === '*') {
+        num1 = rand(11, 25); num2 = rand(5, 15); answer = num1 * num2;
+      } else {
+        num2 = rand(3, 20); answer = rand(5, 40); num1 = num2 * answer;
+      }
+    }
+    triggerQuestionBounce(); 
+    
+    const opStr = operator.replace('*', '×').replace('/', '÷');
+    
+    return { 
+      answer: answer.toString(), 
+      text: `${num1} ${opStr} ${num2}`, 
+      num1: num1.toString(),
+      op: opStr,
+      num2: num2.toString()
+    };
+  }
+
+  function drawRoundRect(ctx, x, y, width, height, radius, fill, shadowColor = null, isPressed = false) {
+    const pressOffset = isPressed ? 4 : 0;
+
+    const createPath = (px, py) => {
+      ctx.beginPath();
+      ctx.moveTo(px + radius, py);
+      ctx.lineTo(px + width - radius, py);
+      ctx.quadraticCurveTo(px + width, py, px + width, py + radius);
+      ctx.lineTo(px + width, py + height - radius);
+      ctx.quadraticCurveTo(px + width, py + height, px + width - radius, py + height);
+      ctx.lineTo(px + radius, py + height);
+      ctx.quadraticCurveTo(px, py + height, px, py + height - radius);
+      ctx.lineTo(px, py + radius);
+      ctx.quadraticCurveTo(px, py, px + radius, py);
+      ctx.closePath();
+    };
+
+    if (shadowColor) {
+      createPath(x, y + 4); 
+      ctx.fillStyle = shadowColor;
+      ctx.fill();
+    }
+
+    createPath(x, y + pressOffset);
+    ctx.fillStyle = fill; 
+    ctx.fill();
+  }
+
+  function registerButton(id, x, y, w, h) {
+    activeButtons.push({ id, x, y, w, h });
+  }
+
+  function drawBgSymbols(ctx) {
+    ctx.save();
+    bgSymbols.forEach(sym => {
+      sym.y += sym.vy;
+      sym.rot += sym.vrot;
+      if (sym.y < -50) { sym.y = HEIGHT + 50; sym.x = Math.random() * WIDTH; }
+      ctx.globalAlpha = sym.alpha;
+      ctx.fillStyle = colors.primary; 
+      ctx.font = `bold ${sym.size}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.translate(sym.x, sym.y);
+      ctx.rotate(sym.rot);
+      ctx.fillText(sym.text, 0, 0);
+      ctx.rotate(-sym.rot);
+      ctx.translate(-sym.x, -sym.y);
+    });
+    ctx.restore();
+  }
+
+
+  // --- 繪製主選單 ---
+  function drawMenu() {
+    ctx.fillStyle = colors.bg;
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+    drawBgSymbols(ctx);
+
+    ctx.save();
+    ctx.translate(sceneOffsetX, 0);
+
+    ctx.fillStyle = colors.primary;
+    ctx.font = 'bold 44px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('極算心速', WIDTH / 2, 140);
+    
+    ctx.fillStyle = colors.textMuted;
+    ctx.font = '16px sans-serif';
+    ctx.fillText('每天訓練大腦 30 秒，讓思路更敏捷！', WIDTH / 2, 180);
+
+    const btnWidth = 300;
+    const btnHeight = 70;
+    const startY = 260;
+    const gap = 20;
+
+    const modes = [
+      { id: 'easy', text: difficultyTextMap['easy'], color: colors.successBg, textCol: colors.success },
+      { id: 'medium', text: difficultyTextMap['medium'], color: colors.warningBg, textCol: colors.warning },
+      { id: 'hard', text: difficultyTextMap['hard'], color: colors.dangerBg, textCol: colors.danger }
+    ];
+
+    modes.forEach((mode, index) => {
+      const y = startY + index * (btnHeight + gap);
+      const isPressed = activePressId === `start_${mode.id}`;
+      drawRoundRect(ctx, (WIDTH - btnWidth)/2, y, btnWidth, btnHeight, 16, mode.color, colors.surfaceShadow, isPressed);
+      
+      ctx.fillStyle = mode.textCol;
+      ctx.font = 'bold 20px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(mode.text, WIDTH / 2, y + btnHeight / 2 + (isPressed ? 4 : 0));
+      
+      registerButton(`start_${mode.id}`, (WIDTH - btnWidth)/2, y, btnWidth, btnHeight);
+    });
+
+    const ruleY = startY + modes.length * (btnHeight + gap) + 15;
+    ctx.fillStyle = colors.textMuted;
+    ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('計分說明：簡單 10分 / 中等 20分 / 困難 40分', WIDTH / 2, ruleY);
+
+    if (highScore > 0) {
+      ctx.fillStyle = colors.warning;
+      ctx.font = 'bold 20px sans-serif';
+      ctx.fillText(`🏆 最高分：${highScore}`, WIDTH / 2, ruleY + 55);
+    }
+    
+    ctx.restore();
+  }
+
+  // --- 繪製準備畫面 ---
+  function drawReady() {
+    ctx.fillStyle = colors.bg;
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+    drawBgSymbols(ctx);
+
+    ctx.save();
+    ctx.translate(sceneOffsetX, 0);
+
+    ctx.fillStyle = colors.textMain;
+    ctx.font = 'bold 44px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('準備好了嗎？', WIDTH / 2, HEIGHT / 2 - 120);
+
+    ctx.fillStyle = colors.textMuted;
+    ctx.font = '18px sans-serif';
+    ctx.fillText('您選擇了：', WIDTH / 2, HEIGHT / 2 - 60);
+    
+    ctx.fillStyle = colors.primary;
+    ctx.font = 'bold 24px sans-serif';
+    ctx.fillText(difficultyTextMap[difficulty], WIDTH / 2, HEIGHT / 2 - 25);
+
+    const btnW = 260;
+    const btnH = 75;
+    const btnY = HEIGHT / 2 + 30;
+    const isStartPressed = activePressId === 'real_start';
+
+    drawRoundRect(ctx, (WIDTH - btnW)/2, btnY, btnW, btnH, 20, colors.primary, colors.primaryShadow, isStartPressed);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 26px sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('▶ 開始計時', WIDTH / 2, btnY + btnH / 2 + (isStartPressed ? 4 : 0));
+    registerButton('real_start', (WIDTH - btnW)/2, btnY, btnW, btnH);
+
+    const backW = 120;
+    const backH = 45;
+    const backY = btnY + btnH + 30;
+    const isBackPressed = activePressId === 'ready_back';
+
+    drawRoundRect(ctx, (WIDTH - backW)/2, backY, backW, backH, 12, colors.surface, colors.surfaceShadow, isBackPressed);
+    ctx.fillStyle = colors.textMuted;
+    ctx.font = 'bold 16px sans-serif';
+    ctx.fillText('返回修改', WIDTH / 2, backY + backH / 2 + (isBackPressed ? 4 : 0));
+    registerButton('ready_back', (WIDTH - backW)/2, backY, backW, backH);
+
+    ctx.restore();
+  }
+
+  // --- 繪製遊戲進行畫面 ---
+  function drawPlaying() {
+    let shakeX = 0;
+    if (feedbackTimer > 0) {
+      if (feedback === 'correct') {
+        ctx.fillStyle = colors.successBg;
+      } else if (feedback === 'wrong') {
+        ctx.fillStyle = colors.dangerBg;
+        shakeX = Math.sin(performance.now() * 0.05) * 8; 
+      }
+    } else {
+      ctx.fillStyle = colors.bg;
+    }
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+    drawBgSymbols(ctx);
+
+    if (timeLeft <= 5 && timeLeft > 0) {
+      const pulse = (Math.sin(performance.now() * 0.01) + 1) / 2; 
+      ctx.save();
+      ctx.strokeStyle = `rgba(244, 63, 94, ${pulse * 0.4})`;
+      ctx.lineWidth = 15;
+      ctx.strokeRect(0, 0, WIDTH, HEIGHT);
+      ctx.restore();
+    }
+
+    ctx.save();
+    ctx.translate(sceneOffsetX, 0);
+
+    // 頂部資訊列
+    drawRoundRect(ctx, 15, 20, 70, 36, 10, colors.surface);
+    ctx.fillStyle = colors.primary;
+    ctx.font = 'bold 18px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`⭐ ${score}`, 50, 38);
+
+    drawRoundRect(ctx, 90, 20, 50, 36, 10, colors.surface);
+    ctx.fillStyle = colors.success;
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(`✅ ${correctCount}`, 115, 38);
+
+    const isQuitPressed = activePressId === 'quit';
+    drawRoundRect(ctx, WIDTH - 65, 20, 50, 36, 10, colors.dangerBg, colors.surfaceShadow, isQuitPressed);
+    ctx.fillStyle = colors.danger;
+    ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('退出', WIDTH - 40, 38 + (isQuitPressed ? 4 : 0));
+    registerButton('quit', WIDTH - 65, 20, 50, 36);
+
+    // --- 特效：連勝能量槽 (Combo Meter) ---
+    ctx.fillStyle = colors.textMuted;
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('COMBO', 148, 32);
+
+    const maxComboVisual = 5;
+    const comboProgress = Math.min(streak / maxComboVisual, 1);
+    const meterWidth = 55; 
+    drawRoundRect(ctx, 148, 38, meterWidth, 8, 4, colors.surfaceHover);
+    if (streak > 0) {
+      let comboColor = colors.success;
+      if (streak >= 3) comboColor = colors.warning;
+      if (streak >= 5) comboColor = colors.danger;
+      drawRoundRect(ctx, 148, 38, meterWidth * comboProgress, 8, 4, comboColor);
+    }
+    if (streak >= 5) {
+      const fireShake = Math.random() * 2 - 1;
+      ctx.font = '16px sans-serif';
+      ctx.fillText('🔥', 148 + meterWidth + 4, 42 + fireShake);
+    }
+
+    const timeColor = timeLeft <= 5 ? colors.danger : colors.textMain;
+    ctx.fillStyle = timeColor;
+    ctx.font = 'bold 22px sans-serif';
+    ctx.textAlign = 'right';
+    const displayTime = timeLeft <= 5 && timeLeft > 0 ? timeLeft.toFixed(1) : Math.ceil(timeLeft);
+    ctx.fillText(`⏱ ${displayTime}s`, WIDTH - 70, 38);
+
+    drawRoundRect(ctx, 20, 70, WIDTH - 40, 8, 4, colors.surface);
+    const progressWidth = Math.max(0, (WIDTH - 40) * (timeLeft / 30));
+    drawRoundRect(ctx, 20, 70, progressWidth, 8, 4, timeColor);
+
+    // 題目區 (符號與數字完美中軸對齊)
+    ctx.save();
+    ctx.translate(WIDTH / 2 + shakeX, 180);
+    ctx.scale(qScale, qScale); 
+    ctx.fillStyle = colors.textMain;
+    ctx.font = 'bold 64px sans-serif';
+    ctx.textBaseline = 'alphabetic';
+    
+    ctx.textAlign = 'center';
+    ctx.fillText(question.op, 0, 0); 
+    
+    const opWidth = ctx.measureText(question.op).width;
+    const spacing = 18; 
+    
+    ctx.textAlign = 'right';
+    ctx.fillText(question.num1, -(opWidth / 2 + spacing), 0); 
+    
+    ctx.textAlign = 'left';
+    ctx.fillText(question.num2, (opWidth / 2 + spacing), 0);  
+    ctx.restore();
+
+    // 輸入顯示區
+    ctx.fillStyle = colors.primary;
+    ctx.font = 'bold 54px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
+
+    let displayInput = userInput || '?';
+    ctx.fillText(displayInput, WIDTH / 2, 250);
+    
+    const textWidth = ctx.measureText(displayInput).width;
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = '#c7d2fe'; 
+    ctx.beginPath();
+    ctx.moveTo(WIDTH / 2 - Math.max(textWidth / 2, 40), 265);
+    ctx.lineTo(WIDTH / 2 + Math.max(textWidth / 2, 40), 265);
+    ctx.stroke();
+
+    if (cursorBlink % 1000 < 500) {
+      ctx.fillStyle = colors.primary;
+      ctx.fillRect(WIDTH / 2 + textWidth/2 + 5, 210, 4, 45);
+    }
+
+    for (let i = floatingTexts.length - 1; i >= 0; i--) {
+      floatingTexts[i].update();
+      floatingTexts[i].draw(ctx);
+      if (floatingTexts[i].life <= 0) floatingTexts.splice(i, 1);
+    }
+
+    // 數字鍵盤
+    const padY = 310;
+    const btnW = 100;
+    const btnH = 60;
+    const gap = 15;
+    const startX = (WIDTH - (btnW * 3 + gap * 2)) / 2;
+
+    const keys = [['1', '2', '3'], ['4', '5', '6'], ['7', '8', '9'], ['C', '0', '⌫']];
+
+    keys.forEach((row, rIdx) => {
+      row.forEach((key, cIdx) => {
+        const x = startX + cIdx * (btnW + gap);
+        const y = padY + rIdx * (btnH + gap);
+        
+        const isAction = key === 'C' || key === '⌫';
+        const isPressed = activePressId === `key_${key}`;
+        
+        drawRoundRect(ctx, x, y, btnW, btnH, 12, isAction ? colors.surface : colors.bg, colors.surfaceShadow, isPressed);
+        
+        ctx.fillStyle = isAction ? colors.textMuted : colors.textMain;
+        ctx.font = 'bold 28px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(key, x + btnW / 2, y + btnH / 2 + 2 + (isPressed ? 4 : 0));
+
+        registerButton(`key_${key}`, x, y, btnW, btnH);
+      });
+    });
+
+    const enterY = padY + 4 * (btnH + gap);
+    const isEnterPressed = activePressId === 'enter';
+    drawRoundRect(ctx, startX, enterY, btnW * 3 + gap * 2, btnH + 10, 16, userInput ? colors.primary : colors.surfaceHover, userInput ? colors.primaryShadow : colors.surfaceShadow, isEnterPressed);
+    ctx.fillStyle = userInput ? '#ffffff' : colors.textMuted;
+    ctx.font = 'bold 24px sans-serif';
+    ctx.fillText('確認 (Enter)', WIDTH / 2, enterY + (btnH + 10) / 2 + (isEnterPressed ? 4 : 0));
+    registerButton('enter', startX, enterY, btnW * 3 + gap * 2, btnH + 10);
+
+    ctx.restore(); 
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+      particles[i].update();
+      particles[i].draw(ctx);
+      if (particles[i].life <= 0 || particles[i].y > HEIGHT) particles.splice(i, 1);
+    }
+  }
+
+  // --- 繪製結算與雲端排行畫面 ---
+  function drawGameOver() {
+    ctx.fillStyle = colors.bg;
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+    drawBgSymbols(ctx);
+
+    ctx.save();
+    ctx.translate(sceneOffsetX, 0);
+
+    ctx.fillStyle = colors.textMain;
+    ctx.font = 'bold 44px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('時間到！', WIDTH / 2, 105);
+
+    const boardY = 150;
+    const boardW = 320;
+    const boardH = 240;
+    const boardX = (WIDTH - boardW) / 2;
+    
+    // 繪製中央資訊圓角面板
+    drawRoundRect(ctx, boardX, boardY, boardW, boardH, 20, colors.surface, colors.surfaceShadow, false);
+
+    // 判斷當前要顯示「個人分數」還是「線上排行榜」
+    if (!showOnlineLeaderboard) {
+      // 顯示個人成績面板
+      ctx.font = '18px sans-serif';
+      ctx.fillStyle = colors.textMuted;
+      ctx.textAlign = 'left';
+      ctx.fillText('本次得分', WIDTH/2 - 120, boardY + 50);
+      ctx.fillText('答對題數', WIDTH/2 - 120, boardY + 105);
+      ctx.fillText('最高連勝', WIDTH/2 - 120, boardY + 160);
+      ctx.fillText('歷史最高', WIDTH/2 - 120, boardY + 215);
+
+      ctx.textAlign = 'right';
+      ctx.fillStyle = colors.primary;
+      ctx.font = 'bold 44px sans-serif';
+      ctx.fillText(Math.round(displayScore).toString(), WIDTH/2 + 120, boardY + 50);
+      
+      ctx.fillStyle = colors.success;
+      ctx.font = 'bold 24px sans-serif';
+      ctx.fillText(`${correctCount} 題`, WIDTH/2 + 120, boardY + 105);
+
+      ctx.fillStyle = colors.warning;
+      ctx.font = 'bold 24px sans-serif';
+      ctx.fillText(`🔥 ${maxStreak}`, WIDTH/2 + 120, boardY + 160);
+
+      ctx.fillStyle = colors.textMain;
+      ctx.font = 'bold 24px sans-serif';
+      ctx.fillText(Math.max(score, highScore).toString(), WIDTH/2 + 120, boardY + 215);
+    } else {
+      // 顯示雲端即時排行榜 (Top 5)
+      ctx.fillStyle = colors.textMain;
+      ctx.font = 'bold 20px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('🌐 即時雲端排行榜 (Top 5)', WIDTH / 2, boardY + 35);
+
+      if (leaderboardStatus === 'fetching' || leaderboardStatus === 'uploading') {
+        ctx.fillStyle = colors.textMuted;
+        ctx.font = '16px sans-serif';
+        ctx.fillText(leaderboardStatus === 'uploading' ? '⚡ 分數同步中...' : '📡 載入最新排行...', WIDTH / 2, boardY + 120);
+      } else if (leaderboardStatus === 'error') {
+        ctx.fillStyle = colors.danger;
+        ctx.font = '15px sans-serif';
+        ctx.fillText('❌ 連線失敗，請確認網址是否配置', WIDTH / 2, boardY + 120);
+      } else {
+        ctx.font = 'bold 15px sans-serif';
+        for (let i = 0; i < 5; i++) {
+          const rowY = boardY + 75 + i * 32;
+          const item = leaderboardData[i];
+          
+          // 前三名加上高亮底色
+          if (i < 3 && item) {
+            ctx.fillStyle = i === 0 ? '#fef3c7' : i === 1 ? '#e2e8f0' : '#ffedd5';
+            drawRoundRect(ctx, boardX + 15, rowY - 17, boardW - 30, 24, 6, ctx.fillStyle);
+          }
+
+          ctx.textAlign = 'left';
+          const rankIcon = i === 0 ? '🥇 ' : i === 1 ? '🥈 ' : i === 2 ? '🥉 ' : `${i + 1}. `;
+          
+          if (item) {
+            ctx.fillStyle = colors.textMain;
+            ctx.fillText(`${rankIcon}${item.name}`, boardX + 25, rowY);
+
+            ctx.textAlign = 'right';
+            ctx.fillStyle = colors.primary;
+            ctx.fillText(`${item.score}分`, boardX + boardW - 25, rowY);
+            
+            ctx.fillStyle = colors.textMuted;
+            ctx.font = '11px sans-serif';
+            const diffLabel = item.difficulty === 'easy' ? '簡單' : item.difficulty === 'medium' ? '中等' : '困難';
+            ctx.fillText(`(${diffLabel})`, boardX + boardW - 75, rowY - 1);
+            ctx.font = 'bold 15px sans-serif'; 
+          } else {
+            ctx.fillStyle = colors.textMuted;
+            ctx.fillText(`${rankIcon}---`, boardX + 25, rowY);
+          }
+        }
+      }
+    }
+
+    const btnW = 280;
+    const btnH = 50;
+    
+    // 按鈕 1：雲端排行榜互動按鈕
+    const isActionPressed = activePressId === 'leaderboard_action';
+    let actionText = '🏆 上傳成績並查看排行';
+    let actionColor = colors.warningBg;
+    let actionTextCol = colors.warning;
+    
+    if (hasSubmitted) {
+      actionText = '🌐 重新整理線上排行';
+      actionColor = colors.successBg;
+      actionTextCol = colors.success;
+    }
+    if (leaderboardStatus === 'uploading') actionText = '⚡ 上傳中...';
+    if (leaderboardStatus === 'fetching') actionText = '📡 讀取中...';
+
+    drawRoundRect(ctx, (WIDTH - btnW)/2, 410, btnW, btnH, 16, actionColor, colors.surfaceShadow, isActionPressed);
+    ctx.fillStyle = actionTextCol;
+    ctx.font = 'bold 18px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(actionText, WIDTH / 2, 435 + (isActionPressed ? 4 : 0));
+    registerButton('leaderboard_action', (WIDTH - btnW)/2, 410, btnW, btnH);
+
+    // 按鈕 2：再玩一次
+    const isRestartPressed = activePressId === 'restart';
+    drawRoundRect(ctx, (WIDTH - btnW)/2, 475, btnW, btnH, 16, colors.primary, colors.primaryShadow, isRestartPressed);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText('🔄 再玩一次', WIDTH / 2, 500 + (isRestartPressed ? 4 : 0));
+    registerButton('restart', (WIDTH - btnW)/2, 475, btnW, btnH);
+
+    // 按鈕 3：回主選單
+    const isHomePressed = activePressId === 'home';
+    drawRoundRect(ctx, (WIDTH - btnW)/2, 540, btnW, btnH, 16, colors.bg, colors.surfaceShadow, isHomePressed);
+    ctx.fillStyle = colors.textMuted;
+    ctx.fillText('🏠 回主選單', WIDTH / 2, 565 + (isHomePressed ? 4 : 0));
+    registerButton('home', (WIDTH - btnW)/2, 540, btnW, btnH);
+
+    ctx.restore();
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+      particles[i].update();
+      particles[i].draw(ctx);
+      if (particles[i].life <= 0 || particles[i].y > HEIGHT) particles.splice(i, 1);
+    }
+  }
+
+  // --- 串接後端：上傳並讀取排行榜 ---
+  async function uploadAndFetch(name) {
+    leaderboardStatus = 'uploading';
+    showOnlineLeaderboard = true;
+    try {
+      await fetch(SCRIPT_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({
+          name: name,
+          score: score,
+          difficulty: difficulty
+        })
+      });
+      hasSubmitted = true;
+      await fetchLeaderboard();
+    } catch (e) {
+      console.error('後端連線出錯:', e);
+      leaderboardStatus = 'error';
+    }
+  }
+
+  // --- 串接後端：單純讀取排行榜 ---
+  async function fetchLeaderboard() {
+    leaderboardStatus = 'fetching';
+    showOnlineLeaderboard = true;
+    try {
+      const response = await fetch(SCRIPT_URL);
+      leaderboardData = await response.json();
+      leaderboardStatus = 'success';
+    } catch (e) {
+      console.error('後端讀取出錯:', e);
+      leaderboardStatus = 'error';
+    }
+  }
+
+  function endGame() {
+    changeState('gameover');
+    displayScore = 0; 
+    showOnlineLeaderboard = false;
+    leaderboardStatus = 'idle';
+    hasSubmitted = false;
+
+    if (score > highScore) {
+      highScore = score;
+      localStorage.setItem('mathDashCanvasHighScore', highScore);
+      spawnConfetti();
+      spawnConfetti();
+    }
+  }
+
+  // --- 遊戲主迴圈 ---
+  function gameLoop(timestamp) {
+    const deltaTime = timestamp - lastTime;
+    lastTime = timestamp;
+    cursorBlink += deltaTime;
+
+    if (Math.abs(sceneOffsetX) > 0.5) {
+      sceneOffsetX += (0 - sceneOffsetX) * 0.15;
+    } else {
+      sceneOffsetX = 0;
+    }
+
+    qScaleVel += (1.0 - qScale) * 0.15; 
+    qScaleVel *= 0.75; 
+    qScale += qScaleVel;
+
+    if (state === 'gameover' && displayScore < score) {
+      displayScore += (score - displayScore) * 0.1;
+      if (Math.abs(score - displayScore) < 0.5) displayScore = score;
+    }
+
+    activeButtons = []; 
+
+    if (state === 'playing') {
+      if (timeLeft > 0 && sceneOffsetX === 0) { 
+        timeLeft -= deltaTime / 1000;
+        if (timeLeft <= 0) {
+          timeLeft = 0;
+          endGame();
+        }
+      }
+      if (feedbackTimer > 0) feedbackTimer -= deltaTime;
+      drawPlaying();
+    } else if (state === 'menu') {
+      drawMenu();
+    } else if (state === 'ready') {
+      drawReady(); 
+    } else if (state === 'gameover') {
+      drawGameOver();
+    }
+
+    requestAnimationFrame(gameLoop);
+  }
+
+  // --- 邏輯處理 ---
+  function prepareGame(diff) {
+    difficulty = diff;
+    changeState('ready'); 
+  }
+
+  function startGame() {
+    score = 0;
+    timeLeft = 30; 
+    streak = 0;
+    maxStreak = 0;
+    correctCount = 0; 
+    userInput = '';
+    particles = []; 
+    floatingTexts = [];
+    question = generateQuestion(difficulty);
+    feedbackTimer = 0;
+    changeState('playing'); 
+  }
+
+  function handleInput(val) {
+    if (state !== 'playing' || sceneOffsetX !== 0) return;
+    if (val === 'C') {
+      userInput = '';
+    } else if (val === '⌫') {
+      userInput = userInput.slice(0, -1);
+    } else if (userInput.length < 6) {
+      userInput += val;
+    }
+  }
+
+  function checkAnswer() {
+    if (state !== 'playing' || sceneOffsetX !== 0 || !userInput) return;
+
+    if (userInput === question.answer) {
+      const basePoints = difficulty === 'easy' ? 10 : difficulty === 'medium' ? 20 : 40;
+      const bonus = Math.min(streak * 2, 20);
+      const pointsGained = basePoints + bonus;
+      
+      score += pointsGained;
+      streak++;
+      maxStreak = Math.max(maxStreak, streak);
+      correctCount++; 
+      
+      feedback = 'correct';
+      feedbackTimer = 300;
+      
+      floatingTexts.push(new FloatingText(WIDTH / 2, 140, `+${pointsGained}`, colors.success));
+
+      if (streak === 3 || streak === 5 || streak % 10 === 0) {
+         spawnConfetti();
+      }
+      
+      question = generateQuestion(difficulty);
+      userInput = '';
+    } else {
+      streak = 0;
+      feedback = 'wrong';
+      feedbackTimer = 400;
+      userInput = '';
+    }
+  }
+
+  // --- 互動事件監聽 ---
+  function handlePointerDown(e) {
+    if (e.type === 'touchstart') e.preventDefault(); 
+    if (Math.abs(sceneOffsetX) > 5) return; 
+
+    const clientX = e.changedTouches ? e.changedTouches[0].clientX : e.clientX;
+    const clientY = e.changedTouches ? e.changedTouches[0].clientY : e.clientY;
+
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width / (window.devicePixelRatio || 1);
+    const scaleY = canvas.height / rect.height / (window.devicePixelRatio || 1);
+    
+    const x = (clientX - rect.left) * scaleX;
+    const y = (clientY - rect.top) * scaleY;
+
+    for (const btn of activeButtons) {
+      if (x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h) {
+        activePressId = btn.id; 
+        
+        if (btn.id.startsWith('start_')) {
+          prepareGame(btn.id.split('_')[1]); 
+        } else if (btn.id === 'real_start') {
+          startGame(); 
+        } else if (btn.id === 'ready_back') {
+          changeState('menu'); 
+        } else if (btn.id === 'leaderboard_action') {
+          if (leaderboardStatus === 'uploading' || leaderboardStatus === 'fetching') return;
+          if (SCRIPT_URL.includes('YOUR_DEPLOYED_SCRIPT_ID')) {
+             alert('請先在 HTML 程式碼第 31 行填入您的 Google Apps Script 網址！');
+             break;
+          }
+          if (!hasSubmitted) {
+            const pName = prompt('請輸入您的姓名、班級或學號 (最多 8 個字)：');
+            if (pName && pName.trim() !== '') {
+              uploadAndFetch(pName.trim().substring(0, 8));
+            }
+          } else {
+            fetchLeaderboard();
+          }
+        } else if (btn.id.startsWith('key_')) {
+          handleInput(btn.id.split('_')[1]);
+        } else if (btn.id === 'enter') {
+          checkAnswer();
+        } else if (btn.id === 'restart') {
+          prepareGame(difficulty); 
+        } else if (btn.id === 'home' || btn.id === 'quit') {
+          changeState('menu');
+        }
+        break; 
+      }
+    }
+  }
+
+  function handlePointerUp() {
+    activePressId = null; 
+  }
+
+  canvas.addEventListener('mousedown', handlePointerDown);
+  canvas.addEventListener('touchstart', handlePointerDown, { passive: false });
+  
+  window.addEventListener('mouseup', handlePointerUp);
+  window.addEventListener('touchend', handlePointerUp);
+
+  window.addEventListener('keydown', (e) => {
+    if (Math.abs(sceneOffsetX) > 0) return;
+
+    if (state === 'ready' && e.key === 'Enter') {
+      activePressId = `real_start`;
+      setTimeout(() => activePressId = null, 100);
+      startGame();
+      return;
+    }
+
+    if (state !== 'playing') return;
+
+    if (e.key >= '0' && e.key <= '9') {
+      handleInput(e.key);
+      activePressId = `key_${e.key}`; 
+      setTimeout(() => activePressId = null, 100);
+    } else if (e.key === 'Backspace') {
+      handleInput('⌫');
+      activePressId = `key_⌫`;
+      setTimeout(() => activePressId = null, 100);
+    } else if (e.key === 'Enter') {
+      checkAnswer();
+      activePressId = `enter`;
+      setTimeout(() => activePressId = null, 100);
+    } else if (e.key === 'Escape') {
+      handleInput('C');
+      activePressId = `key_C`;
+      setTimeout(() => activePressId = null, 100);
+    }
+  });
+
+  requestAnimationFrame(gameLoop);
+
+</script>
+</body>
+</html>
+"""
+
+with open('index.html', 'w', encoding='utf-8') as f:
+    f.write(html_content)
+print("File 'index.html' generated successfully.")
